@@ -1,21 +1,22 @@
-[TcpInput]
-address = "127.0.0.1:5565"
-parser_type = "message.proto"
-decoder = "ProtobufDecoder"
+[RedisListInput]
+address = "127.0.0.1:6379"
+key = "logstash"
+set_hostname = true
 
-[HostFilter]
-message_matcher = "Type != 'heka.counter-output'"
-hosts = ["127.0.0.1", "grail"]
-output = "UdpOutput"
-
-[CounterFilter]
-message_matcher = "Type != 'heka.counter-output'"
-ticker_interval = 1
-
-[UdpOutput]
-address = "127.0.0.1:6676"
+[RstEncoder]
 
 [LogOutput]
-message_matcher = "Type == 'heka.counter-output' || Type == 'heka.all-report'"
-payload_only = true
+message_matcher = "TRUE"
+encoder = "RstEncoder"
 
+
+[ESLogstashV0Encoder]
+es_index_from_timestamp = true
+type_name = "%{Type}"
+timestamp = "%Y-%m-%dT%H:%M:%S.000Z"
+
+[RedisListOutput]
+message_matcher = "TRUE"
+address = "127.0.0.1:6379"
+key = "logstash_staging"
+encoder = "ESLogstashV0Encoder"
