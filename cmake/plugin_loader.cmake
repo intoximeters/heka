@@ -1,1 +1,1 @@
-add_external_plugin(git https://github.com/TheDude05/heka-redislist 0ebaa57de84aab20ae91d126cbdb4b3f244f0df3)
+add_external_plugin(git https://github.com/intoximeters/heka-redislist.git cf5772a47c4c7038eae343d7615cccec6681e6a7)
