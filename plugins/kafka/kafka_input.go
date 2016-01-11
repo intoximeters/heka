@@ -55,6 +55,9 @@ type KafkaInputConfig struct {
 	MaxWaitTime      uint32 `toml:"max_wait_time"`
 	OffsetMethod     string `toml:"offset_method"` // Manual, Newest, Oldest
 	EventBufferSize  int    `toml:"event_buffer_size"`
+	// Interval at which the Kafka offset should be persisted to disk in
+	// milliseconds (default 0). Set to 0 to disable.
+	CheckpointInterval int64 `toml:"checkpoint_interval"`
 }
 
 type KafkaInput struct {
@@ -71,6 +74,7 @@ type KafkaInput struct {
 	stopChan           chan bool
 	name               string
 	checkpointFilename string
+	checkpointOffset   int64
 }
 
 func (k *KafkaInput) ConfigStruct() interface{} {
@@ -90,6 +94,7 @@ func (k *KafkaInput) ConfigStruct() interface{} {
 		MaxWaitTime:                250,
 		OffsetMethod:               "Manual",
 		EventBufferSize:            16,
+		CheckpointInterval:         0,
 	}
 }
 
@@ -120,6 +125,34 @@ func readCheckpoint(filename string) (offset int64, err error) {
 	}
 	defer file.Close()
 	err = binary.Read(file, binary.LittleEndian, &offset)
+	return
+}
+
+func (k *KafkaInput) backgroundCheckpoint(interval int64, errChan chan<- error) {
+	var lastOffset, tmp int64
+	var err error
+
+	timerDuration := time.Duration(interval) * time.Millisecond
+	timer := time.NewTimer(timerDuration)
+
+	ok := true
+	for ok {
+		select {
+		case <-timer.C:
+			tmp = atomic.LoadInt64(&k.checkpointOffset)
+			if tmp > lastOffset {
+				if err = k.writeCheckpoint(tmp); err != nil {
+					errChan <- err
+					return
+				}
+				lastOffset = tmp
+			}
+			timer.Reset(timerDuration)
+		case <-k.stopChan:
+			ok = false
+		}
+	}
+
 	return
 }
 
@@ -165,6 +198,7 @@ func (k *KafkaInput) Init(config interface{}) (err error) {
 			if offset, err = readCheckpoint(k.checkpointFilename); err != nil {
 				return fmt.Errorf("readCheckpoint %s", err)
 			}
+			k.checkpointOffset = offset
 		} else {
 			if err = os.MkdirAll(filepath.Dir(k.checkpointFilename), 0766); err != nil {
 				return err
@@ -223,6 +257,16 @@ func (k *KafkaInput) Run(ir pipeline.InputRunner, h pipeline.PluginHelper) (err 
 	k.ir = ir
 	k.stopChan = make(chan bool)
 
+	var bgErrChan chan error
+	asyncCheckpoint := false
+
+	if k.config.CheckpointInterval > 0 {
+		asyncCheckpoint = true
+		bgErrChan = make(chan error)
+
+		go k.backgroundCheckpoint(k.config.CheckpointInterval, bgErrChan)
+	}
+
 	var (
 		hostname = k.pConfig.Hostname()
 		event    *sarama.ConsumerMessage
@@ -263,8 +307,11 @@ func (k *KafkaInput) Run(ir pipeline.InputRunner, h pipeline.PluginHelper) (err 
 			}
 
 			if k.config.OffsetMethod == "Manual" {
-				if err = k.writeCheckpoint(event.Offset + 1); err != nil {
-					return err
+				atomic.StoreInt64(&k.checkpointOffset, event.Offset+1)
+				if !asyncCheckpoint {
+					if err = k.writeCheckpoint(atomic.LoadInt64(&k.checkpointOffset)); err != nil {
+						return
+					}
 				}
 			}
 
@@ -289,6 +336,10 @@ func (k *KafkaInput) Run(ir pipeline.InputRunner, h pipeline.PluginHelper) (err 
 			atomic.AddInt64(&k.processMessageFailures, 1)
 			ir.LogError(cError.Err)
 
+		case err = <-bgErrChan:
+			// We should only get errors on this channel if we're using the
+			// background offset checkpointing
+			return
 		case <-k.stopChan:
 			return nil
 		}
